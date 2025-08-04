@@ -1,0 +1,76 @@
+DATASET: 'CustomDataset'
+DATA_PATH: '/media/darrell/DLJR_T7/datasets/OpenPCDVenti3D'
+
+POINT_CLOUD_RANGE: [-75.52, -75.52, -2, 75.52, 75.52, 4.0]
+
+# Class mapping for CustomDataset compatibility (not used since EVAL_METRIC is waymo)
+# Not useful for Venti3D since it is entirely different scenario
+MAP_CLASS_TO_KITTI: {
+    'Vehicle': 'Car',
+    'Pedestrian': 'Pedestrian',
+    'Static': 'Car'
+}
+
+DATA_SPLIT: {
+    'train': train,
+    'test': val
+}
+
+INFO_PATH: {
+    'train': [venti3d_infos_train.pkl],
+    'test': [venti3d_infos_val.pkl],
+}
+
+POINT_FEATURE_ENCODING: {
+    encoding_type: absolute_coordinates_encoding,
+    used_feature_list: ['x', 'y', 'z', 'intensity'],
+    src_feature_list: ['x', 'y', 'z', 'intensity'],
+}
+
+DATA_AUGMENTOR:
+    DISABLE_AUG_LIST: ['placeholder']
+    AUG_CONFIG_LIST:
+        - NAME: gt_sampling
+          USE_ROAD_PLANE: False
+          DB_INFO_PATH:
+              - venti3d_dbinfos_train.pkl
+          PREPARE: {
+             filter_by_min_points: ['Vehicle:5', 'Pedestrian:10', 'Static:10'],
+             filter_by_difficulty: [-1],
+          }
+
+          SAMPLE_GROUPS: ['Vehicle:15', 'Pedestrian:10', 'Static:12']
+          NUM_POINT_FEATURES: 4
+          DATABASE_WITH_FAKELIDAR: False
+          REMOVE_EXTRA_WIDTH: [0.0, 0.0, 0.0]
+          LIMIT_WHOLE_SCENE: True
+
+        - NAME: random_world_flip
+          ALONG_AXIS_LIST: ['x', 'y']
+
+        - NAME: random_world_rotation
+          WORLD_ROT_ANGLE: [-0.78539816, 0.78539816]
+
+        - NAME: random_world_scaling
+          WORLD_SCALE_RANGE: [0.95, 1.05]
+
+        - NAME: random_world_translation
+          NOISE_TRANSLATE_STD: [0.5, 0.5, 0.5]
+
+DATA_PROCESSOR:
+    - NAME: mask_points_and_boxes_outside_range
+      REMOVE_OUTSIDE_BOXES: True
+
+    - NAME: shuffle_points
+      SHUFFLE_ENABLED: {
+        'train': True,
+        'test': True
+      }
+
+    - NAME: transform_points_to_voxels
+      VOXEL_SIZE: [0.32, 0.32, 0.1875]
+      MAX_POINTS_PER_VOXEL: 5
+      MAX_NUMBER_OF_VOXELS: {
+        'train': 80000,
+        'test': 80000
+      }

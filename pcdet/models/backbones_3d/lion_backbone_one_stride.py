@@ -368,7 +368,7 @@ class LIONLayer(nn.Module):
 
             x_features = block(x_features)
 
-            x.features[indices] = x_features.view(-1, x_features.shape[-1])[mappings["win2flat"]]
+            x.features[indices] = x_features.view(-1, x_features.shape[-1])[mappings["win2flat"]].to(x.features.dtype)
 
         return x
 

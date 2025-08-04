@@ -292,7 +292,13 @@ def save_checkpoint(state, filename='checkpoint'):
             torch.save({'optimizer_state': optimizer_state}, optimizer_filename)
 
     filename = '{}.pth'.format(filename)
+    temp_filename = filename + '.tmp'
+    
+    # Atomic save: write to temp file first, then rename
     if torch.__version__ >= '1.4':
-        torch.save(state, filename, _use_new_zipfile_serialization=False)
+        torch.save(state, temp_filename, _use_new_zipfile_serialization=False)
     else:
-        torch.save(state, filename)
+        torch.save(state, temp_filename)
+    
+    # Atomic rename - this is guaranteed to be atomic on most filesystems
+    os.rename(temp_filename, filename)
