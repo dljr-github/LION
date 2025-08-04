@@ -3,7 +3,7 @@ CLASS_NAMES: ['Vehicle', 'Pedestrian', 'Static']
 DATA_CONFIG:
     _BASE_CONFIG_: cfgs/dataset_configs/venti3d_dataset.yaml
     
-    DATA_PATH: '/media/darrell/1 TB/darrell/datasets/OpenPCDVenti3D/'
+    DATA_PATH: '/media/darrell/X9 Pro/offline_pdn/datasets/OpenPCDVenti3D/'
 
     SAMPLED_INTERVAL: {'train': 1, 'test': 1}
     POINT_CLOUD_RANGE: [-75.52, -75.52, -2, 75.52, 75.52, 4.0]
@@ -153,7 +153,7 @@ MODEL:
 
     POST_PROCESSING:
         RECALL_THRESH_LIST: [0.3, 0.5, 0.7]
-        EVAL_METRIC: waymo
+        EVAL_METRIC: kitti
 
 OPTIMIZATION:
     BATCH_SIZE_PER_GPU: 1

@@ -91,8 +91,13 @@ def eval_one_epoch(cfg, args, model, dataloader, epoch_id, logger, dist_test=Fal
         metric = common_utils.merge_results_dist([metric], world_size, tmpdir=result_dir / 'tmpdir')
 
     logger.info('*************** Performance of EPOCH %s *****************' % epoch_id)
-    sec_per_example = (time.time() - start_time) / len(dataloader.dataset)
-    logger.info('Generate label finished(sec_per_example: %.4f second).' % sec_per_example)
+    dataset_len = len(dataloader.dataset)
+    if dataset_len > 0:
+        sec_per_example = (time.time() - start_time) / dataset_len
+        logger.info('Generate label finished(sec_per_example: %.4f second).' % sec_per_example)
+    else:
+        logger.error('Dataset is empty! Please check dataset configuration and paths.')
+        return {}
 
     if cfg.LOCAL_RANK != 0:
         return {}

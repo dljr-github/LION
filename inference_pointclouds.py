@@ -221,6 +221,9 @@ def convert_predictions_to_json(predictions, frame_id, timestamp=None, score_thr
         final_scores = []
         final_labels = []
         
+        # Class-specific NMS thresholds based on evaluation config: [0.75, 0.6, 0.55] for [Vehicle, Pedestrian, Static]
+        class_nms_thresholds = {0: 0.75, 1: 0.6, 2: 0.55}  # Vehicle, Pedestrian, Static
+        
         # Process each class separately
         for class_id in np.unique(pred_labels):
             class_mask = pred_labels == class_id
@@ -232,8 +235,9 @@ def convert_predictions_to_json(predictions, frame_id, timestamp=None, score_thr
                 class_boxes_tensor = torch.from_numpy(class_boxes).cuda()
                 class_scores_tensor = torch.from_numpy(class_scores).cuda()
                 
-                # Apply NMS with configurable IoU threshold
-                keep_idx, _ = iou3d_nms_utils.nms_gpu(class_boxes_tensor, class_scores_tensor, thresh=nms_threshold)
+                # Use class-specific NMS threshold, fallback to default
+                class_threshold = class_nms_thresholds.get(class_id, nms_threshold)
+                keep_idx, _ = iou3d_nms_utils.nms_gpu(class_boxes_tensor, class_scores_tensor, thresh=class_threshold)
                 keep_idx = keep_idx.cpu().numpy()
                 
                 final_boxes.append(class_boxes[keep_idx])
@@ -349,58 +353,34 @@ def convert_predictions_to_json(predictions, frame_id, timestamp=None, score_thr
     return result
 
 
-def main():
-    parser = argparse.ArgumentParser(description='Run inference on point cloud data')
-    parser.add_argument('--cfg_file', type=str, required=True,
-                        help='Path to config file (e.g., tools/cfgs/lion_models/lion_mamba_venti3d_8x_1f_1x_one_stride_64dim.yaml)')
-    parser.add_argument('--ckpt', type=str, required=True, 
-                        help='Path to model checkpoint')
-    parser.add_argument('--bundle_path', type=str,  required=True,
-                        help='Path to point cloud directory')
-    parser.add_argument('--score_threshold', type=float, default=0.5,
-                        help='Score threshold for filtering detections (default: 0.5)')
-    parser.add_argument('--nms_threshold', type=float, default=0.4,
-                        help='NMS IoU threshold for removing duplicate detections (default: 0.4)')
-    parser.add_argument('--cross_class_nms', type=float, default=0.3,
-                        help='Cross-class NMS IoU threshold for same object different classes (default: 0.3)')
-    parser.add_argument('--track_distance', type=float, default=5.0,
-                        help='Maximum distance for track association (default: 5.0)')
-    parser.add_argument('--max_frames_lost', type=int, default=5,
-                        help='Maximum frames a track can be lost before deletion (default: 5)')
-    parser.add_argument('--use_mapped_classes', action='store_true', default=False,
-                        help='Use mapped classes (Vehicle/Pedestrian/Static) instead of unmapped classes')
+def find_bundle_directories(root_dir):
+    """Find all subdirectories containing a gta.yaml file."""
+    root_path = Path(root_dir)
+    bundle_dirs = []
     
-    args = parser.parse_args()
+    for subdir in root_path.iterdir():
+        if subdir.is_dir():
+            gta_file = subdir / 'gta.yaml'
+            if gta_file.exists():
+                bundle_dirs.append(subdir)
     
-    # Change to tools directory to handle relative paths in config files
-    original_cwd = os.getcwd()
-    os.chdir(tools_dir)
-    
-    try:
-        # Load config - cfg_file path should be relative to tools directory
-        cfg_from_yaml_file(args.cfg_file, cfg)
-    finally:
-        # Change back to original directory
-        os.chdir(original_cwd)
+    return sorted(bundle_dirs)
 
+
+def process_bundle(bundle_path, model, cfg, tracker, args, logger):
+    """Process a single bundle directory."""
     # Get data and output paths
-    data_path = Path(args.bundle_path) / 'pcd'
+    data_path = bundle_path / 'pcd'
     if not data_path.exists():
-        raise FileNotFoundError(f"Data path {data_path} does not exist. Please check the bundle path.")
+        logger.warning(f"Data path {data_path} does not exist. Skipping bundle {bundle_path.name}.")
+        return False
     
-    output_dir = Path(args.bundle_path) / 'annotations'
-    if not output_dir.exists():
-        output_dir.mkdir(parents=True, exist_ok=True)
-    
-    # Create output directory
+    output_dir = bundle_path / 'annotations'
     output_dir.mkdir(parents=True, exist_ok=True)
-
-    # Setup logging
-    logger = common_utils.create_logger()
-    logger.info('Starting point cloud inference...')
+    
+    logger.info(f'Processing bundle: {bundle_path.name}')
     logger.info(f'Data path: {data_path}')
     logger.info(f'Output directory: {output_dir}')
-    logger.info(f'Model checkpoint: {args.ckpt}')
     
     # Create dataset
     inference_dataset = InferenceDataset(
@@ -410,18 +390,16 @@ def main():
         logger=logger
     )
     
+    if len(inference_dataset) == 0:
+        logger.warning(f'No point cloud files found in {data_path}. Skipping bundle {bundle_path.name}.')
+        return False
+    
     logger.info(f'Found {len(inference_dataset)} point cloud files')
     
-    # Build and load model
-    model = build_network(model_cfg=cfg.MODEL, num_class=len(cfg.CLASS_NAMES), dataset=inference_dataset)
-    model.load_params_from_file(filename=args.ckpt, logger=logger, to_cpu=False)
-    model.cuda()
-    model.eval()
-    
-    logger.info('Model loaded successfully')
-    
-    # Create tracker
-    tracker = SimpleTracker(max_distance=args.track_distance, max_frames_lost=args.max_frames_lost)
+    # Reset tracker for new bundle
+    tracker.tracks = {}
+    tracker.next_track_id = 0
+    tracker.frame_count = 0
     
     # Run inference
     with torch.no_grad():
@@ -453,10 +431,94 @@ def main():
             output_file = output_dir / f'{frame_id}.json'
             with open(output_file, 'w') as f:
                 json.dump(result_json, f, indent=2)
-            
-            logger.info(f'Saved results to {output_file}')
     
-    logger.info('Inference completed!')
+    logger.info(f'Completed processing bundle: {bundle_path.name}')
+    return True
+
+
+def main():
+    parser = argparse.ArgumentParser(description='Run inference on point cloud data')
+    parser.add_argument('--cfg_file', type=str, required=True,
+                        help='Path to config file (e.g., tools/cfgs/lion_models/lion_mamba_venti3d_8x_1f_1x_one_stride_64dim.yaml)')
+    parser.add_argument('--ckpt', type=str, required=True, 
+                        help='Path to model checkpoint')
+    parser.add_argument('--root_dir', type=str, required=True,
+                        help='Root directory containing subdirectories with gta.yaml files')
+    parser.add_argument('--score_threshold', type=float, default=0.50,
+                        help='Score threshold for filtering detections (default: 0.50 - top 30% based on score distribution analysis)')
+    parser.add_argument('--nms_threshold', type=float, default=0.6,
+                        help='NMS IoU threshold for removing duplicate detections (default: 0.6 - average of evaluation thresholds)')
+    parser.add_argument('--cross_class_nms', type=float, default=0.5,
+                        help='Cross-class NMS IoU threshold for same object different classes (default: 0.5)')
+    parser.add_argument('--track_distance', type=float, default=5.0,
+                        help='Maximum distance for track association (default: 5.0)')
+    parser.add_argument('--max_frames_lost', type=int, default=5,
+                        help='Maximum frames a track can be lost before deletion (default: 5)')
+    parser.add_argument('--use_mapped_classes', action='store_true', default=True,
+                        help='Use mapped classes (Vehicle/Pedestrian/Static) instead of unmapped classes')
+    
+    args = parser.parse_args()
+    
+    # Change to tools directory to handle relative paths in config files
+    original_cwd = os.getcwd()
+    os.chdir(tools_dir)
+    
+    try:
+        # Load config - cfg_file path should be relative to tools directory
+        cfg_from_yaml_file(args.cfg_file, cfg)
+    finally:
+        # Change back to original directory
+        os.chdir(original_cwd)
+
+    # Setup logging
+    logger = common_utils.create_logger()
+    logger.info('Starting point cloud inference...')
+    logger.info(f'Root directory: {args.root_dir}')
+    logger.info(f'Model checkpoint: {args.ckpt}')
+    
+    # Find bundle directories
+    bundle_dirs = find_bundle_directories(args.root_dir)
+    if not bundle_dirs:
+        logger.error(f"No subdirectories with gta.yaml files found in {args.root_dir}")
+        return
+    
+    logger.info(f'Found {len(bundle_dirs)} bundle directories: {[d.name for d in bundle_dirs]}')
+    
+    # Build and load model (do this once for all bundles)
+    # Create a dummy dataset for model building
+    dummy_data_path = bundle_dirs[0] / 'pcd'
+    if not dummy_data_path.exists():
+        logger.error(f"First bundle {bundle_dirs[0].name} does not have pcd directory")
+        return
+    
+    dummy_dataset = InferenceDataset(
+        dataset_cfg=cfg.DATA_CONFIG,
+        class_names=cfg.CLASS_NAMES,
+        root_path=dummy_data_path,
+        logger=logger
+    )
+    
+    model = build_network(model_cfg=cfg.MODEL, num_class=len(cfg.CLASS_NAMES), dataset=dummy_dataset)
+    model.load_params_from_file(filename=args.ckpt, logger=logger, to_cpu=False)
+    model.cuda()
+    model.eval()
+    
+    logger.info('Model loaded successfully')
+    
+    # Create tracker
+    tracker = SimpleTracker(max_distance=args.track_distance, max_frames_lost=args.max_frames_lost)
+    
+    # Process each bundle directory
+    successful_bundles = 0
+    for i, bundle_path in enumerate(bundle_dirs):
+        logger.info(f'\n=== Processing bundle {i+1}/{len(bundle_dirs)}: {bundle_path.name} ===')
+        
+        success = process_bundle(bundle_path, model, cfg, tracker, args, logger)
+        if success:
+            successful_bundles += 1
+    
+    logger.info(f'\n=== Inference completed! ===')
+    logger.info(f'Successfully processed {successful_bundles}/{len(bundle_dirs)} bundles')
 
 
 if __name__ == '__main__':
